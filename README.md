@@ -13,8 +13,8 @@
 - Processamento assíncrono com status de envio, processamento, aprovada, rejeitada, desfeita ou erro.
 - UUID por transação, permitindo associar cada resposta ao registro correto e processar vendas independentes.
 - Histórico de transações recentes na tela inicial. O histórico atual fica em memória e não sobrevive ao encerramento do processo do app.
-- Opção para manter a tela de resultado aberta durante o processamento. Quando desativada, é possível voltar ao início e acompanhar a transação pelo histórico.
-- Para vendas iniciadas no fluxo de venda, as opções de comprovante abrem automaticamente após três segundos em um resultado final, se a pessoa continuar nessa tela. O botão **Imprimir comprovante** abre as opções imediatamente.
+- Opção **Exibir comprovante automaticamente**: quando ativada, impede voltar ao menu inicial durante o processamento e mantém o operador no fluxo até o polling receber o status final da transação. Três segundos depois, abre as opções de vias. Quando desativada, é possível voltar ao menu inicial enquanto a transação continua em processamento, iniciar novas vendas sem esperar o status final da anterior e consultar o andamento no histórico. Se permanecer na tela de resultado, as opções de vias também abrem após três segundos.
+- O botão **Imprimir comprovante** na tela de resultado abre as opções de vias imediatamente.
 - Comprovantes disponíveis para os resultados finais, com status, via do estabelecimento, via do cliente ou ambas.
 - Prévia digital do comprovante na tela. O app não chama uma impressora nem abre o diálogo de impressão do Android.
 - Modo de demonstração configurável: aprovação, rejeição, timeout/desfazimento e atraso simulado de 0 a 13 segundos.
@@ -63,12 +63,14 @@ Após o resultado, é possível escolher a via do estabelecimento, a via do clie
 
 ### Configuração de demonstração
 
-As configurações permitem ajustar o nome do estabelecimento, os limites de venda e o comportamento do mock: resultado simulado e atraso da resposta.
+As configurações permitem escolher o resultado simulado da API (aprovação, rejeição ou desfazimento por timeout), definir o atraso da resposta, editar o nome do estabelecimento e configurar os valores mínimo e máximo das vendas. Também é possível ativar a exibição automática do comprovante. Nesse modo, o operador permanece no fluxo até o polling receber o status final da transação; não pode voltar ao menu inicial durante essa espera. Três segundos depois, são exibidas as opções de vias. Com a opção desativada, pode voltar ao menu inicial enquanto a transação continua em processamento, iniciar novas vendas sem esperar o status final da anterior e consultar o andamento no histórico.
 
-<p align="center">
-  <img src="docs/screenshots/configuracao-testes.png" alt="Configurações dos cenários de teste, estabelecimento, atraso da API e limites de transação" width="250">
-</p>
-<p align="center"><sub>Configurações do estabelecimento, do mock e dos limites</sub></p>
+<table>
+  <tr>
+    <td align="center"><img src="docs/screenshots/configuracao-testes.png" alt="Configurações de simulação, nome do estabelecimento e início dos limites da transação" width="250"><br><sub>Cenário de teste, estabelecimento e limites</sub></td>
+    <td align="center"><img src="docs/screenshots/configuracao-comprovante.png" alt="Continuação das configurações com limites e opção de exibir comprovante automaticamente" width="250"><br><sub>Limites e comprovante automático</sub></td>
+  </tr>
+</table>
 
 ## Arquitetura e organização da interface
 
