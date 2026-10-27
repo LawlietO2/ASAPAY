@@ -91,7 +91,7 @@ internal fun ReceiptOptionsScreen(
                     ) { Text(copies.label, fontWeight = FontWeight.Medium) }
                     Spacer(Modifier.height(12.dp))
                 }
-                Text("A prévia será exibida na tela. Nenhuma impressão será enviada.", color = AsaMuted, style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center)
+                Text("Impressão simulada. Nenhum comprovante físico será emitido.", color = AsaMuted, style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center)
             }
         }
         if (showHomeButton) {
