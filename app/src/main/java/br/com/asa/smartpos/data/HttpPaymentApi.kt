@@ -5,6 +5,7 @@ import br.com.asa.smartpos.domain.SalePayloadValidator
 import br.com.asa.smartpos.domain.TransactionStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONException
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -23,13 +24,32 @@ class HttpPaymentApi(
     override suspend fun poll(transactionId: String): TransactionStatus? = withContext(Dispatchers.IO) {
         val encodedId = java.net.URLEncoder.encode(transactionId, Charsets.UTF_8.name())
         val response = request("GET", "polling?transactionId=$encodedId")
-        val status = JSONObject(response).optString("status")
-        when (status) {
+        parsePollingResponse(response, transactionId)
+    }
+
+    private fun parsePollingResponse(response: String, requestedTransactionId: String): TransactionStatus? {
+        val json = try {
+            JSONObject(response)
+        } catch (failure: JSONException) {
+            throw PaymentApiResponseException("A API retornou um JSON inválido no polling.", failure)
+        }
+
+        val responseTransactionId = json.opt("transactionId") as? String
+        if (responseTransactionId.isNullOrBlank()) {
+            throw PaymentApiResponseException("A resposta do polling não contém transactionId.")
+        }
+        if (responseTransactionId != requestedTransactionId) {
+            throw PaymentApiResponseException("A resposta do polling pertence a outra transação.")
+        }
+
+        val status = json.opt("status") as? String
+            ?: throw PaymentApiResponseException("A resposta do polling não contém um status válido.")
+        return when (status) {
             "APROVADA" -> TransactionStatus.APPROVED
             "REJEITADA" -> TransactionStatus.REJECTED
             "DESFEITA" -> TransactionStatus.UNDONE
-            "", "PENDENTE", "PROCESSANDO" -> null
-            else -> error("Status de transação desconhecido: $status")
+            "PENDENTE", "PROCESSANDO" -> null
+            else -> throw PaymentApiResponseException("Status de transação desconhecido: $status")
         }
     }
 

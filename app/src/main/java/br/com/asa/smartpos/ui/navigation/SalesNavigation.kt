@@ -143,6 +143,7 @@ internal fun SalesNavigation(
                     showHomeButton = openedFromHome,
                     onFinish = { navController.navigateHome() },
                     onSelectCopies = { copies ->
+                        paymentViewModel.printReceipt(record.sale.transactionId, copies.targets)
                         navController.navigate(
                             SalesRoutes.receiptPreview(record.sale.transactionId, copies.name)
                         ) {

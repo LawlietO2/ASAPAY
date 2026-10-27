@@ -25,6 +25,7 @@ class MockPaymentApi(
     private val pollsById = ConcurrentHashMap<String, Int>()
     private val responseDelayById = ConcurrentHashMap<String, Long>()
     private val authorizedAtById = ConcurrentHashMap<String, Long>()
+    private val undoneTransactionIds = ConcurrentHashMap.newKeySet<String>()
     private val undoCounter = AtomicInteger()
     val undoRequests: Int get() = undoCounter.get()
 
@@ -39,6 +40,7 @@ class MockPaymentApi(
 
     override suspend fun poll(transactionId: String): TransactionStatus? {
         delay(pollDelayMs)
+        if (transactionId in undoneTransactionIds) return TransactionStatus.UNDONE
         val selectedOutcome = outcomeById[transactionId] ?: return null
         if (selectedOutcome == MockOutcome.TIMEOUT_UNDO) return null
         val polls = pollsById.merge(transactionId, 1) { previous, increment -> previous + increment } ?: 1
@@ -53,6 +55,7 @@ class MockPaymentApi(
 
     override suspend fun undo(sale: Sale) {
         delay(undoDelayMs)
+        undoneTransactionIds += sale.transactionId
         undoCounter.incrementAndGet()
     }
 }

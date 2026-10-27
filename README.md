@@ -1,6 +1,6 @@
 # ASA PAY — SmartPOS
 
-> Protótipo Android em Kotlin para demonstrar um fluxo de venda em SmartPOS: entrada do valor, processamento assíncrono, resultados, histórico em sessão e prévia digital de comprovantes. O modo mock é usado por padrão. O adaptador HTTP e a cifra do payload são implementações de demonstração e ainda precisam ser alinhados e homologados com um backend e um terminal reais.
+> Protótipo Android em Kotlin para demonstrar um fluxo de venda em SmartPOS: entrada do valor, processamento assíncrono, resultados, histórico em sessão, prévia digital e impressão simulada de comprovantes. O modo mock é usado por padrão. O adaptador HTTP, a impressora simulada e a cifra do payload são implementações de demonstração e ainda precisam ser alinhados e homologados com um backend e um terminal reais.
 
 ## Funcionalidades
 
@@ -16,9 +16,11 @@
 - Opção **Exibir comprovante automaticamente**: quando ativada, impede voltar ao menu inicial durante o processamento e mantém o operador no fluxo até o polling receber o status final da transação. Três segundos depois, abre as opções de vias. Quando desativada, é possível voltar ao menu inicial enquanto a transação continua em processamento, iniciar novas vendas sem esperar o status final da anterior e consultar o andamento no histórico. Se permanecer na tela de resultado, as opções de vias também abrem após três segundos.
 - O botão **Imprimir comprovante** na tela de resultado abre as opções de vias imediatamente.
 - Comprovantes disponíveis para os resultados finais, com status, via do estabelecimento, via do cliente ou ambas.
-- Prévia digital do comprovante na tela. O app não chama uma impressora nem abre o diálogo de impressão do Android.
+- Impressão por meio da abstração `ReceiptPrinter`, com uma implementação simulada em memória. Cada solicitação registra `transactionId`, valor em centavos, status e vias selecionadas; não há comunicação com hardware de impressão.
+- A impressão iniciada ao final da venda e a reimpressão pelo histórico usam o mesmo fluxo. Reimpressões do mesmo comprovante geram novos jobs sem alterar o `transactionId` da transação.
+- Prévia digital do comprovante na tela. O app não abre o diálogo de impressão do Android.
 - Modo de demonstração configurável: aprovação, rejeição, timeout/desfazimento e atraso simulado de 0 a 13 segundos.
-- Limite de polling de 15 segundos, iniciado após a autorização, com consulta a cada 500 ms. No timeout, o app solicita `/undo`.
+- Prazo total de 15 segundos, iniciado no começo da venda e incluindo autorização e polling, com consultas a cada 500 ms. Ao vencer, o app cancela o trabalho pendente e solicita `/undo` usando o mesmo `transactionId`.
 
 ## Fluxo apresentado
 
@@ -102,10 +104,12 @@ Os composables também permitem dividir a interface em peças reutilizáveis e m
 | `ui/PaymentViewModel.kt` | Orquestração assíncrona da venda e publicação dos registros por `StateFlow`. |
 | `ui/settings/SalesSettings.kt` | Modelo das configurações e leitura/gravação com `SharedPreferences`. |
 | `domain/` | Modelos da venda e transação, status e validação de payload. |
+| `domain/ReceiptCopy.kt` | Tipos de via disponíveis para uma solicitação de impressão. |
 | `data/PaymentApi.kt` | Contrato comum para autorização, polling e desfazimento. |
 | `data/MockPaymentApi.kt` | Backend simulado usado por padrão. Não faz chamadas de rede nem cifra payloads. |
 | `data/HttpPaymentApi.kt` | Adaptador para as chamadas HTTPS e interpretação das respostas. |
 | `data/PayloadCipher.kt` | Cifragem AES-256-GCM do payload de autorização e desfazimento no adaptador HTTP. |
+| `data/ReceiptPrinter.kt` | Contrato de impressão, modelo dos jobs e implementação simulada em memória para impressão e reimpressão. |
 
 O `PaymentViewModel` depende da interface `PaymentApi`; `MockPaymentApi` e `HttpPaymentApi` implementam esse contrato. Isso permite exercitar o fluxo com o mock e testar o adaptador HTTP sem fazer o ViewModel depender dos detalhes de transporte. Não há uma classe de repositório separada nesta versão.
 
@@ -137,7 +141,11 @@ O endereço configurado atualmente é `https://example.invalid/`, um placeholder
 | `GET` | `/polling?transactionId=...` | Retorna `APROVADA`, `REJEITADA`, `DESFEITA`, `PENDENTE` ou `PROCESSANDO`. |
 | `POST` | `/undo` | Recebe o envelope cifrado para solicitar o desfazimento. |
 
-O contrato ainda precisa ser confirmado com o backend: nomes e formatos dos campos, semântica dos status e erros HTTP, idempotência por `transactionId` e significado da resposta de `/undo`. Em caso de falha de comunicação durante autorização, o app tenta `/undo` usando o mesmo ID, mas não consulta o backend para confirmar se a autorização chegou a ser registrada. Retentativas e reconciliação de resultados ambíguos precisam ser definidas com o serviço.
+O polling espera o objeto descrito no desafio, com `paymentType`, `transactionId`, `amount`, `merchantId`, `terminalId` e `status`. O app associa a resposta ao ID consultado e aceita como pendentes apenas os status `PENDENTE` e `PROCESSANDO`; status ausente, desconhecido, JSON inválido ou `transactionId` divergente são tratados como resposta incompatível com o contrato, e o fluxo solicita `/undo` uma vez. Os outros campos retornados são aceitos conforme o contrato, sem validações adicionais sobre os valores ecoados.
+
+Não há retentativas automáticas de autorização ou desfazimento. O timeout HTTP 408, a limitação HTTP 429 e erros HTTP fora da faixa de erros de cliente tratada como rejeição definitiva levam a uma única solicitação de `/undo` com o mesmo `transactionId`. O HTTP 400 e demais respostas 4xx, exceto 408 e 429, são mostrados como erro da solicitação, sem desfazimento automático. Essa regra evita repetir operações financeiras e ainda precisa ser confirmada com o backend, em especial para definir a semântica dos códigos HTTP e de `/undo`.
+
+Em caso de falha de comunicação durante autorização, o app tenta `/undo` usando o mesmo ID, mas não consulta o backend para confirmar se a autorização chegou a ser registrada. A implementação do mock registra o desfazimento e passa a retornar `DESFEITA` em polling posterior para o mesmo ID. No backend real, a confirmação desse estado e a idempotência das operações precisam ser garantidas pelo serviço.
 
 ## Testes automatizados (JVM)
 
@@ -149,26 +157,26 @@ Execute os testes JVM com:
 
 No Windows, use `gradlew.bat :app:testDebugUnitTest`. O relatório HTML do Gradle é gerado em `app/build/reports/tests/testDebugUnitTest/index.html`.
 
-O conjunto atual contém **25 testes**:
+O conjunto atual contém **32 testes**:
 
 | Suíte | Qtde. | Cobertura principal |
 | --- | ---: | --- |
-| `PaymentViewModelTest` | 10 | Aprovação, rejeição, timeout e `/undo`, atraso simulado, vendas simultâneas, erro HTTP 400, falhas na autorização e polling, falha no undo e resposta no limite do timeout. Usa relógio virtual e APIs controladas em memória. |
+| `PaymentViewModelTest` | 16 | Aprovação, rejeição, timeout e `/undo`; estado do mock após desfazimento; prazo total incluindo autorização e polling; chamadas pendentes que ignoram cancelamento; resposta no limite do timeout; vendas simultâneas; falhas de comunicação e respostas inválidas; HTTP 400, 408 e 429 sem repetição de autorização; e jobs da impressora simulada. Usa relógio virtual e APIs controladas em memória. |
 | `SalePayloadValidatorTest` | 9 | Payload válido e validações de ID, valor, `merchantId` e `terminalId`, incluindo campos vazios, tamanho e caracteres não numéricos. |
 | `PayloadCipherTest` | 2 | Recuperação do conteúdo com a chave de teste, IVs novos em cifragens distintas e rejeição de chave que não tenha 256 bits. |
-| `HttpPaymentApiTest` | 4 | Teste local do adaptador: corpos cifrados de autorização/undo, mapeamento e codificação do polling, leitura de mensagem HTTP 400 e recusa de URL sem HTTPS. |
+| `HttpPaymentApiTest` | 5 | Teste local do adaptador: corpos cifrados de autorização/undo, resposta completa de polling e mapeamento dos status, ID da transação, respostas incompletas/divergentes, leitura de mensagem HTTP 400 e recusa de URL sem HTTPS. |
 
 `HttpPaymentApiTest` inicia um servidor **HTTPS falso local** durante o teste. O servidor usa um certificado de teste em `app/src/test/resources/asa-test-server.p12`, captura requisições e devolve respostas pré-configuradas. Assim, os testes exercitam o adaptador HTTP real sem acessar um backend externo. Isso não comprova compatibilidade com uma adquirente nem testa integração com hardware. A suíte atual também não contém testes automatizados de interface Compose.
 
 ## Limitações e próximos passos de integração
 
 - O modo padrão é mock e o endereço HTTP configurado é apenas um placeholder.
-- O histórico de transações fica em memória. Se precisar sobreviver ao encerramento do app, uma camada persistente, como Room, deverá ser adicionada.
+- O histórico de transações fica em memória, conforme o escopo do protótipo; o backend é a fonte de verdade. Persistência local mínima de operações pendentes e recuperação após reinicialização podem ser avaliadas futuramente, depois de definir com o backend um contrato de reconciliação por `transactionId`.
 - `merchantId` e `terminalId` são valores de demonstração no modelo atual.
 - Validações no app melhoram o fluxo, mas o backend também precisa validar todos os dados.
-- O projeto não integra leitor de cartão, PIN pad, SDK de adquirente ou impressora física. A tela de comprovante é uma prévia visual.
+- O projeto não integra leitor de cartão, PIN pad, SDK de adquirente ou impressora física. A `SimulatedReceiptPrinter` registra jobs em memória; a tela também apresenta uma prévia digital.
 - A política de idempotência, retentativa, reconciliação após falha de comunicação e confirmação de `/undo` depende do contrato com o backend.
-- A janela de polling de 15 segundos começa após a autorização. As chamadas HTTP têm timeout de conexão e leitura de 5 segundos cada; o tempo total percebido pode variar conforme a rede.
+- O prazo de 15 segundos inclui autorização e polling. Ao vencer, o app solicita `/undo` com o mesmo `transactionId`. Como `HttpURLConnection` usa chamadas bloqueantes, o cancelamento pode não encerrar imediatamente uma conexão já em andamento; ainda assim, o coordenador do prazo inicia o tratamento do timeout e o undo sem aguardar essa conexão. Cada chamada HTTP tem timeout de conexão e leitura de 5 segundos; a tela recebe o status final após a resposta do `/undo`.
 
 ## Pré-requisitos e execução local
 

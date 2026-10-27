@@ -76,22 +76,50 @@ class HttpPaymentApiTest {
         logSeparator()
         logScenario("[CENARIO] Polling HTTPS converte status e codifica o transactionId")
         withTrustedFakeServer { server ->
-            server.enqueue("/polling", 200, "{\"status\":\"APROVADA\"}")
-            server.enqueue("/polling", 200, "{\"status\":\"PROCESSANDO\"}")
-            server.enqueue("/polling", 200, "{\"status\":\"REJEITADA\"}")
+            server.enqueue("/polling", 200, pollingResponse("id com/espaco", "APROVADA"))
+            server.enqueue("/polling", 200, pollingResponse("id com/espaco", "PROCESSANDO"))
+            server.enqueue("/polling", 200, pollingResponse("id com/espaco", "REJEITADA"))
+            server.enqueue("/polling", 200, pollingResponse("id com/espaco", "DESFEITA"))
             val api = HttpPaymentApi(server.baseUrl, TEST_KEY_BASE64)
             val transactionId = "id com/espaco"
 
             val approved = api.poll(transactionId)
             val pending = api.poll(transactionId)
             val rejected = api.poll(transactionId)
+            val undone = api.poll(transactionId)
 
             assertEquals(TransactionStatus.APPROVED, approved)
             assertNull(pending)
             assertEquals(TransactionStatus.REJECTED, rejected)
+            assertEquals(TransactionStatus.UNDONE, undone)
             assertEquals("transactionId=id+com%2Fespaco", server.requests.first().rawQuery)
-            logProcessing("[VALIDANDO] APROVADA, PROCESSANDO e REJEITADA; query URL-encoded.")
+            logProcessing("[VALIDANDO] JSON completo, os quatro status e query URL-encoded.")
             logResult("[RESULTADO] Status finais mapeados e status pendente representado por null.")
+        }
+        logSeparator()
+    }
+
+    @Test
+    fun pollingRejectsMissingStatusAndMismatchedTransactionId() = runBlocking {
+        logSeparator()
+        logScenario("[CENARIO] Polling recebe resposta incompleta ou de outra transação")
+        withTrustedFakeServer { server ->
+            server.enqueue("/polling", 200, pollingResponse("expected-id", null))
+            server.enqueue("/polling", 200, pollingResponse("different-id", "APROVADA"))
+            val api = HttpPaymentApi(server.baseUrl, TEST_KEY_BASE64)
+
+            repeat(2) {
+                var capturedException: PaymentApiResponseException? = null
+                try {
+                    api.poll("expected-id")
+                } catch (exception: PaymentApiResponseException) {
+                    capturedException = exception
+                }
+                assertNotNull(capturedException)
+            }
+
+            logProcessing("[VALIDANDO] Status ausente e transactionId divergente não são tratados como pendentes.")
+            logResult("[RESULTADO] As duas respostas inválidas foram rejeitadas como erro de contrato.")
         }
         logSeparator()
     }
@@ -161,6 +189,15 @@ class HttpPaymentApiTest {
         assertEquals(expectedSale.merchantId, payload.getString("merchantId"))
         assertEquals(expectedSale.terminalId, payload.getString("terminalId"))
     }
+
+    private fun pollingResponse(transactionId: String, status: String?): String = JSONObject()
+        .put("paymentType", "Credito")
+        .put("transactionId", transactionId)
+        .put("amount", 100)
+        .put("merchantId", "123456789012345")
+        .put("terminalId", "12345678")
+        .apply { if (status != null) put("status", status) }
+        .toString()
 
     private companion object {
         val TEST_KEY_BYTES = ByteArray(32) { (it + 1).toByte() }

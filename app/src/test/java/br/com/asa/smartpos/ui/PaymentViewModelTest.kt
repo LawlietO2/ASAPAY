@@ -4,10 +4,16 @@ import br.com.asa.smartpos.data.MockOutcome
 import br.com.asa.smartpos.data.MockPaymentApi
 import br.com.asa.smartpos.data.PaymentApi
 import br.com.asa.smartpos.data.PaymentApiException
+import br.com.asa.smartpos.data.PaymentApiResponseException
+import br.com.asa.smartpos.data.SimulatedReceiptPrinter
+import br.com.asa.smartpos.domain.ReceiptCopy
 import br.com.asa.smartpos.domain.PaymentType
 import br.com.asa.smartpos.domain.Sale
 import br.com.asa.smartpos.domain.TransactionStatus
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
@@ -80,6 +86,7 @@ class PaymentViewModelTest {
         assertEquals(TransactionStatus.UNDONE, transaction.status)
         assertEquals("Tempo limite excedido; desfazimento solicitado.", transaction.detail)
         assertEquals(1, api.undoRequests)
+        assertEquals(TransactionStatus.UNDONE, api.poll(transaction.sale.transactionId))
 
         logSeparator()
     }
@@ -193,6 +200,46 @@ class PaymentViewModelTest {
     }
 
     @Test
+    fun requestTimeoutAndRateLimitEachRequestOneUndoWithoutRetryingAuthorization() = runTest {
+        logSeparator()
+        logScenario("[CENARIO] HTTP 408 e 429 não provocam retentativa financeira")
+
+        listOf(408, 429).forEach { statusCode ->
+            val api = ClientErrorPaymentApi("Resposta HTTP $statusCode", statusCode)
+            val viewModel = PaymentViewModel(api = api, operationScope = this)
+
+            val id = viewModel.sell(1_750L, PaymentType.CREDIT, autoPrint = false)!!
+            runCurrent()
+
+            val transaction = viewModel.transactions.value.single { it.sale.transactionId == id }
+            assertEquals("HTTP $statusCode solicita desfazimento", TransactionStatus.UNDONE, transaction.status)
+            assertEquals("HTTP $statusCode solicita exatamente um undo", 1, api.undoRequests)
+            assertEquals("HTTP $statusCode autoriza uma única vez", 1, api.authorizationRequests)
+        }
+
+        logResult("[RESULTADO] Para 408 e 429, cada venda teve uma autorização e uma solicitação de undo.")
+        logSeparator()
+    }
+
+    @Test
+    fun invalidPollingResponseRequestsUndoInsteadOfRemainingPending() = runTest {
+        logSeparator()
+        logScenario("[CENARIO] Resposta HTTP válida mas incompatível com o contrato de polling")
+        val api = InvalidPollingResponseApi()
+        val viewModel = PaymentViewModel(api = api, operationScope = this)
+
+        val id = viewModel.sell(2_000L, PaymentType.DEBIT, autoPrint = false)!!
+        runCurrent()
+
+        val transaction = viewModel.transactions.value.single()
+        assertEquals(id, transaction.sale.transactionId)
+        assertEquals(TransactionStatus.UNDONE, transaction.status)
+        assertEquals(1, api.undoRequests)
+        logResult("[RESULTADO] Resposta inválida não ficou como pendente; um undo foi solicitado.")
+        logSeparator()
+    }
+
+    @Test
     fun communicationFailureDuringAuthorizationRequestsUndo() = runTest {
         logSeparator()
         logScenario("[CENARIO] Falha de comunicação durante a autorização")
@@ -275,6 +322,130 @@ class PaymentViewModelTest {
         logSeparator()
     }
 
+    @Test
+    fun totalTimeoutIncludesAuthorizationAndPolling() = runTest {
+        logSeparator()
+        logScenario("[CENARIO] Autorização e polling ultrapassam juntos o prazo total de 15 segundos")
+        val api = DelayedAuthorizationPaymentApi(
+            authorizationDelayMs = 12_000,
+            pollingDelayMs = 4_000,
+            result = TransactionStatus.APPROVED
+        )
+        val viewModel = PaymentViewModel(
+            api = api,
+            operationScope = this,
+            timeoutMs = 15_000,
+            pollIntervalMs = 500,
+            monotonicTimeMs = { testScheduler.currentTime }
+        )
+
+        val id = viewModel.sell(4_500L, PaymentType.CREDIT, autoPrint = false)!!
+        advanceUntilIdle()
+
+        val transaction = viewModel.transactions.value.single()
+        assertEquals(TransactionStatus.UNDONE, transaction.status)
+        assertEquals(1, api.undoSales.size)
+        assertEquals(id, api.undoSales.single().transactionId)
+        logResult("[RESULTADO] O tempo da autorização entrou no prazo total; status=${transaction.status}, undo=${api.undoSales.size}.")
+        logSeparator()
+    }
+
+    @Test
+    fun timeoutRequestsUndoWhileAuthorizationIsStillUnresponsive() = runTest {
+        logSeparator()
+        logScenario("[CENARIO] A autorização não responde nem à solicitação de cancelamento")
+        val api = UnresponsiveAuthorizationPaymentApi()
+        val viewModel = PaymentViewModel(
+            api = api,
+            operationScope = this,
+            timeoutMs = 15_000,
+            pollIntervalMs = 500,
+            monotonicTimeMs = { testScheduler.currentTime }
+        )
+
+        val id = viewModel.sell(5_100L, PaymentType.DEBIT, autoPrint = false)!!
+        runCurrent()
+        assertEquals(true, api.authorizationStarted.isCompleted)
+
+        advanceTimeBy(15_000)
+        runCurrent()
+
+        assertEquals(1, api.undoRequests)
+        assertEquals(id, api.undoSales.single().transactionId)
+        assertEquals(TransactionStatus.UNDONE, viewModel.transactions.value.single().status)
+        assertEquals(false, api.releaseAuthorization.isCompleted)
+        api.releaseAuthorization.complete(Unit)
+        runCurrent()
+        assertEquals(TransactionStatus.UNDONE, viewModel.transactions.value.single().status)
+        logResult("[RESULTADO] O timeout iniciou /undo no prazo e a autorização pendente não alterou o resultado.")
+        logSeparator()
+    }
+
+    @Test
+    fun timeoutRequestsUndoWhilePollingIsStillUnresponsive() = runTest {
+        logSeparator()
+        logScenario("[CENARIO] Uma chamada de polling permanece sem resposta após o prazo total")
+        val api = UnresponsivePollingPaymentApi()
+        val viewModel = PaymentViewModel(
+            api = api,
+            operationScope = this,
+            timeoutMs = 15_000,
+            pollIntervalMs = 500,
+            monotonicTimeMs = { testScheduler.currentTime }
+        )
+
+        val id = viewModel.sell(5_200L, PaymentType.CREDIT, autoPrint = false)!!
+        runCurrent()
+        assertEquals(true, api.pollStarted.isCompleted)
+
+        advanceTimeBy(15_000)
+        runCurrent()
+
+        assertEquals(1, api.undoRequests)
+        assertEquals(id, api.undoSales.single().transactionId)
+        assertEquals(TransactionStatus.UNDONE, viewModel.transactions.value.single().status)
+        assertEquals(false, api.releasePoll.isCompleted)
+        api.releasePoll.complete(Unit)
+        runCurrent()
+        assertEquals(TransactionStatus.UNDONE, viewModel.transactions.value.single().status)
+        logResult("[RESULTADO] O timeout solicitou /undo sem aguardar a chamada de polling pendente.")
+        logSeparator()
+    }
+
+    @Test
+    fun receiptPrinterReceivesTransactionAmountStatusAndAllowsReprints() = runTest {
+        logSeparator()
+        logScenario("[CENARIO] Imprimir e reimprimir o comprovante de uma transação aprovada")
+        val printer = SimulatedReceiptPrinter()
+        val viewModel = PaymentViewModel(
+            api = mockApi(MockOutcome.APPROVED),
+            operationScope = this,
+            timeoutMs = 50,
+            pollIntervalMs = 10,
+            monotonicTimeMs = { testScheduler.currentTime },
+            receiptPrinter = printer
+        )
+        val id = viewModel.sell(1_234L, PaymentType.CREDIT, autoPrint = false)!!
+        advanceUntilIdle()
+
+        val copies = setOf(ReceiptCopy.ESTABLISHMENT, ReceiptCopy.CUSTOMER)
+        viewModel.printReceipt(id, copies)
+        runCurrent()
+        val firstJob = printer.printJobs.single()
+        assertEquals(id, firstJob.transactionId)
+        assertEquals(1_234L, firstJob.amountInCents)
+        assertEquals(TransactionStatus.APPROVED, firstJob.status)
+        assertEquals(copies, firstJob.copies)
+
+        // Reprinting intentionally records another print job for the same payment ID.
+        viewModel.printReceipt(id, copies)
+        runCurrent()
+        assertEquals(2, printer.printJobs.size)
+        assertEquals(id, printer.printJobs.last().transactionId)
+        logResult("[RESULTADO] O job contém transactionId, valor, status e vias; a reimpressão é aceita.")
+        logSeparator()
+    }
+
     private fun mockApi(outcome: MockOutcome) = MockPaymentApi(
         outcome = outcome,
         authorizeDelayMs = 0,
@@ -326,15 +497,36 @@ private class ControlledPaymentApi : PaymentApi {
     }
 }
 
-private class ClientErrorPaymentApi(private val serverMessage: String) : PaymentApi {
+private class ClientErrorPaymentApi(
+    private val serverMessage: String,
+    private val statusCode: Int = 400
+) : PaymentApi {
     var undoRequests = 0
+        private set
+    var authorizationRequests = 0
         private set
 
     override suspend fun authorize(sale: Sale) {
-        throw PaymentApiException(400, serverMessage)
+        authorizationRequests += 1
+        throw PaymentApiException(statusCode, serverMessage)
     }
 
     override suspend fun poll(transactionId: String): TransactionStatus? = null
+
+    override suspend fun undo(sale: Sale) {
+        undoRequests += 1
+    }
+}
+
+private class InvalidPollingResponseApi : PaymentApi {
+    var undoRequests = 0
+        private set
+
+    override suspend fun authorize(sale: Sale) = Unit
+
+    override suspend fun poll(transactionId: String): TransactionStatus? {
+        throw PaymentApiResponseException("A resposta não contém status.")
+    }
 
     override suspend fun undo(sale: Sale) {
         undoRequests += 1
@@ -380,5 +572,63 @@ private class LateResponsePaymentApi(
 
     override suspend fun undo(sale: Sale) {
         undoRequests += 1
+    }
+}
+
+private class DelayedAuthorizationPaymentApi(
+    private val authorizationDelayMs: Long,
+    private val pollingDelayMs: Long,
+    private val result: TransactionStatus
+) : PaymentApi {
+    val undoSales = mutableListOf<Sale>()
+
+    override suspend fun authorize(sale: Sale) {
+        delay(authorizationDelayMs)
+    }
+
+    override suspend fun poll(transactionId: String): TransactionStatus? {
+        delay(pollingDelayMs)
+        return result
+    }
+
+    override suspend fun undo(sale: Sale) {
+        undoSales += sale
+    }
+}
+
+private class UnresponsiveAuthorizationPaymentApi : PaymentApi {
+    val authorizationStarted = CompletableDeferred<Unit>()
+    val releaseAuthorization = CompletableDeferred<Unit>()
+    val undoSales = mutableListOf<Sale>()
+    val undoRequests: Int get() = undoSales.size
+
+    override suspend fun authorize(sale: Sale) {
+        authorizationStarted.complete(Unit)
+        withContext(NonCancellable) { releaseAuthorization.await() }
+    }
+
+    override suspend fun poll(transactionId: String): TransactionStatus? = TransactionStatus.APPROVED
+
+    override suspend fun undo(sale: Sale) {
+        undoSales += sale
+    }
+}
+
+private class UnresponsivePollingPaymentApi : PaymentApi {
+    val pollStarted = CompletableDeferred<Unit>()
+    val releasePoll = CompletableDeferred<Unit>()
+    val undoSales = mutableListOf<Sale>()
+    val undoRequests: Int get() = undoSales.size
+
+    override suspend fun authorize(sale: Sale) = Unit
+
+    override suspend fun poll(transactionId: String): TransactionStatus? {
+        pollStarted.complete(Unit)
+        withContext(NonCancellable) { releasePoll.await() }
+        return TransactionStatus.APPROVED
+    }
+
+    override suspend fun undo(sale: Sale) {
+        undoSales += sale
     }
 }
