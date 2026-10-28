@@ -7,7 +7,7 @@ internal data class SalesSettings(
     val establishmentName: String = "Padaria pão bom",
     val minimumCents: Long = 1L,
     val maximumCents: Long = 10_000_000L,
-    val autoPrint: Boolean = true,
+    val autoPrint: Boolean = false,
     val mockOutcome: MockOutcome = MockOutcome.APPROVED,
     val mockResponseDelaySeconds: Int = 0
 )
@@ -21,7 +21,7 @@ internal class SalesSettingsStore(context: Context) {
             ?: "Padaria pão bom",
         minimumCents = preferences.getLong("minimum_cents", 1L),
         maximumCents = preferences.getLong("maximum_cents", 10_000_000L),
-        autoPrint = preferences.getBoolean("auto_print", true),
+        autoPrint = preferences.getBoolean("auto_print", false),
         mockOutcome = runCatching {
             MockOutcome.valueOf(preferences.getString("mock_outcome", null) ?: "APPROVED")
         }.getOrDefault(MockOutcome.APPROVED),
